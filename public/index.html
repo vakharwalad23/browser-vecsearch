@@ -3,17 +3,276 @@
 	<head>
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-		<title>Hello, World!</title>
+		<title>Local Embedding & Search Demo</title>
+		<style>
+			body {
+				font-family: Arial, sans-serif;
+				background-color: #1a1a1a;
+				margin: 0;
+				padding: 20px;
+				color: #e0e0e0;
+			}
+			.container {
+				max-width: 800px;
+				margin: 0 auto;
+				background: #2c2c2c;
+				padding: 20px;
+				border-radius: 8px;
+				box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+			}
+			h1,
+			h2 {
+				color: #ffffff;
+			}
+			textarea,
+			input {
+				width: 100%;
+				padding: 10px;
+				margin-bottom: 10px;
+				box-sizing: border-box;
+				background-color: #3c3c3c;
+				border: 1px solid #4c4c4c;
+				color: #e0e0e0;
+				border-radius: 4px;
+			}
+			button {
+				padding: 10px 20px;
+				background-color: #007bff;
+				color: white;
+				border: none;
+				cursor: pointer;
+				border-radius: 4px;
+			}
+			button:hover {
+				background-color: #0056b3;
+			}
+			.card {
+				background-color: #3c3c3c;
+				padding: 15px;
+				margin-bottom: 10px;
+				border-radius: 8px;
+				border-left: 4px solid #007bff;
+			}
+			.progress-bar {
+				height: 10px;
+				background-color: #007bff;
+				border-radius: 5px;
+				margin-top: 5px;
+			}
+			#loading {
+				display: none;
+				color: #007bff;
+				font-weight: bold;
+			}
+			#error {
+				display: none;
+				color: #ff4444;
+			}
+		</style>
+		<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
 	</head>
 	<body>
-		<h1 id="heading"></h1>
+		<div class="container">
+			<h1>Local embedding & search Demo</h1>
+			<p id="loading">Loading model, please wait...</p>
+			<p id="error"></p>
+			<section id="documents">
+				<h2>Documents</h2>
+				<textarea id="document-input" placeholder="Add a new document..."></textarea>
+				<button id="add-document">Add Document</button>
+				<div id="document-list"></div>
+			</section>
+			<section id="search">
+				<h2>Search</h2>
+				<input type="text" id="search-input" placeholder="What is AI?" />
+				<button id="search-button">Search</button>
+				<div id="search-results"></div>
+			</section>
+		</div>
 		<script>
-			fetch('/message')
-				.then((resp) => resp.text())
-				.then((text) => {
-					const h1 = document.getElementById('heading');
-					h1.textContent = text;
+			let session;
+			const dbName = 'searchDB';
+			const storeName = 'documents';
+			let db;
+
+			// Simple tokenizer with expected sequence length of 8
+			function simpleTokenize(text) {
+				const tokens = text
+					.toLowerCase()
+					.split(/\W+/)
+					.filter((t) => t.length > 0);
+				const vocab = new Map();
+				vocab.set('[CLS]', BigInt(101));
+				vocab.set('[SEP]', BigInt(102));
+				vocab.set('the', BigInt(200));
+				vocab.set('is', BigInt(201));
+				let inputIds = tokens.map((token) => vocab.get(token) || BigInt(100));
+				inputIds = [BigInt(101), ...inputIds, BigInt(102)];
+				const maxLength = 8;
+				if (inputIds.length > maxLength) inputIds = inputIds.slice(0, maxLength);
+				else inputIds = inputIds.concat(Array(maxLength - inputIds.length).fill(BigInt(0)));
+				const attentionMask = inputIds.map((id) => (id > BigInt(0) ? BigInt(1) : BigInt(0)));
+				return { input_ids: inputIds, attention_mask: attentionMask };
+			}
+
+			// Initialize IndexedDB
+			const request = indexedDB.open(dbName, 1);
+			request.onupgradeneeded = (event) => {
+				db = event.target.result;
+				db.createObjectStore(storeName, { keyPath: 'id', autoIncrement: true });
+			};
+			request.onsuccess = (event) => {
+				db = event.target.result;
+				loadDocuments();
+			};
+			request.onerror = (event) => {
+				console.error('IndexedDB error:', event.target.errorCode);
+			};
+
+			// Load model and preload documents
+			async function initialize() {
+				const loading = document.getElementById('loading');
+				const error = document.getElementById('error');
+				if (!loading || !error) {
+					console.error('Loading or error element not found');
+					return;
+				}
+				loading.style.display = 'block';
+				try {
+					const modelUrl = 'https://browser-vecsearch.davakharwala20.workers.dev/student_embeddings_model_quantized.onnx';
+					session = await ort.InferenceSession.create(modelUrl, {
+						executionProviders: ['wasm'],
+					});
+					loading.style.display = 'none';
+					console.log('Model loaded successfully');
+
+					// Preload documents after session is ready
+					const transaction = db.transaction([storeName], 'readwrite');
+					const store = transaction.objectStore(storeName);
+					const preloadedDocs = [
+						{
+							content:
+								'Neural networks draw inspiration from the intricate structure and function of biological brains, implementing artificial neurons and synapses to process information. These interconnected networks can adapt and learn from experience, forming the backbone of modern artificial intelligence systems. From simple perceptrons to complex architectures like convolutional and recurrent neural networks, these bio-inspired systems continue to push the boundaries of what machines can achieve.',
+						},
+						{
+							content:
+								"Deep learning, a specialized subset of machine learning, has revolutionized artificial intelligence by mimicking the human brain's neural networks. These sophisticated systems can process and analyze unstructured data like images, videos, and natural language with unprecedented accuracy. Through multiple layers of artificial neurons, deep learning models can automatically learn hierarchical representations of data, enabling breakthroughs in computer vision, speech recognition, and autonomous systems.",
+						},
+						{
+							content:
+								'Machine learning algorithms have become increasingly sophisticated in their ability to learn patterns from vast amounts of data. These systems can automatically improve their performance through experience, analyzing complex datasets to identify trends, make predictions, and generate insights that would be impossible for humans to discover manually. From recommendation systems to fraud detection, machine learning is driving innovation across countless applications.',
+						},
+					];
+					for (const doc of preloadedDocs) {
+						const { input_ids, attention_mask } = simpleTokenize(doc.content);
+						const inputIdsTensor = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
+						const attentionMaskTensor = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
+						const outputs = await session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor });
+						store.add({ content: doc.content, embedding: Array.from(outputs.embeddings.data) });
+					}
+					loadDocuments();
+				} catch (error) {
+					console.error('Model loading or preloading error:', error);
+					loading.style.display = 'none';
+					error.style.display = 'block';
+					error.textContent = `Error: ${error.message}. Check console for details.`;
+				}
+			}
+
+			// Add document
+			document.getElementById('add-document').addEventListener('click', async () => {
+				const text = document.getElementById('document-input').value.trim();
+				if (!text || !session) return;
+				try {
+					const { input_ids, attention_mask } = simpleTokenize(text);
+					const inputIds = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
+					const attentionMask = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
+					const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
+					const embedding = outputs.embeddings.data;
+					const transaction = db.transaction([storeName], 'readwrite');
+					const store = transaction.objectStore(storeName);
+					store.add({ content: text, embedding: Array.from(embedding) });
+					transaction.oncomplete = () => {
+						document.getElementById('document-input').value = '';
+						loadDocuments();
+					};
+				} catch (error) {
+					console.error('Error adding document:', error);
+				}
+			});
+
+			// Load and display documents as cards
+			function loadDocuments() {
+				const transaction = db.transaction([storeName], 'readonly');
+				const store = transaction.objectStore(storeName);
+				const getAllRequest = store.getAll();
+				getAllRequest.onsuccess = () => {
+					const documents = getAllRequest.result;
+					const docList = document.getElementById('document-list');
+					docList.innerHTML = '';
+					documents.forEach((doc) => {
+						const card = document.createElement('div');
+						card.className = 'card';
+						card.innerHTML = `<p>${doc.content}</p>`;
+						docList.appendChild(card);
+					});
+				};
+			}
+
+			// Perform search
+			document.getElementById('search-button').addEventListener('click', async () => {
+				const query = document.getElementById('search-input').value.trim();
+				if (!query || !session) return;
+				try {
+					const { input_ids, attention_mask } = simpleTokenize(query);
+					const inputIds = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
+					const attentionMask = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
+					const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
+					const queryEmbedding = outputs.embeddings.data;
+					const transaction = db.transaction([storeName], 'readonly');
+					const store = transaction.objectStore(storeName);
+					const getAllRequest = store.getAll();
+					getAllRequest.onsuccess = () => {
+						const documents = getAllRequest.result;
+						const results = documents
+							.map((doc) => ({
+								...doc,
+								similarity: cosineSimilarity(queryEmbedding, doc.embedding),
+							}))
+							.sort((a, b) => b.similarity - a.similarity)
+							.slice(0, 5);
+						displayResults(results);
+					};
+				} catch (error) {
+					console.error('Error searching:', error);
+				}
+			});
+
+			// Cosine similarity function
+			function cosineSimilarity(a, b) {
+				const dot = a.reduce((sum, val, i) => sum + val * b[i], 0);
+				const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
+				const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
+				return normA && normB ? dot / (normA * normB) : 0;
+			}
+
+			// Display search results with percentage and progress bar
+			function displayResults(results) {
+				const resultsDiv = document.getElementById('search-results');
+				resultsDiv.innerHTML = '';
+				results.forEach((result) => {
+					const similarityPercent = (result.similarity * 100).toFixed(2);
+					const card = document.createElement('div');
+					card.className = 'card';
+					card.innerHTML = `<p>${result.content}</p>
+                    <div>Match Score: ${similarityPercent}%</div>
+                    <div class="progress-bar" style="width: ${similarityPercent}%"></div>`;
+					resultsDiv.appendChild(card);
 				});
+			}
+
+			// Initialize the app
+			initialize();
 		</script>
 	</body>
 </html>
