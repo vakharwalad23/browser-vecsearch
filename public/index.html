@@ -129,7 +129,7 @@
 				console.error('IndexedDB error:', event.target.errorCode);
 			};
 
-			// Load model and preload documents
+			// Load model and preload documents only if not already present
 			async function initialize() {
 				const loading = document.getElementById('loading');
 				const error = document.getElementById('error');
@@ -146,31 +146,46 @@
 					loading.style.display = 'none';
 					console.log('Model loaded successfully');
 
-					// Preload documents after session is ready
-					const transaction = db.transaction([storeName], 'readwrite');
+					// Check existing documents and preload only if not present
+					const transaction = db.transaction([storeName], 'readonly');
 					const store = transaction.objectStore(storeName);
-					const preloadedDocs = [
-						{
-							content:
-								'Neural networks draw inspiration from the intricate structure and function of biological brains, implementing artificial neurons and synapses to process information. These interconnected networks can adapt and learn from experience, forming the backbone of modern artificial intelligence systems. From simple perceptrons to complex architectures like convolutional and recurrent neural networks, these bio-inspired systems continue to push the boundaries of what machines can achieve.',
-						},
-						{
-							content:
-								"Deep learning, a specialized subset of machine learning, has revolutionized artificial intelligence by mimicking the human brain's neural networks. These sophisticated systems can process and analyze unstructured data like images, videos, and natural language with unprecedented accuracy. Through multiple layers of artificial neurons, deep learning models can automatically learn hierarchical representations of data, enabling breakthroughs in computer vision, speech recognition, and autonomous systems.",
-						},
-						{
-							content:
-								'Machine learning algorithms have become increasingly sophisticated in their ability to learn patterns from vast amounts of data. These systems can automatically improve their performance through experience, analyzing complex datasets to identify trends, make predictions, and generate insights that would be impossible for humans to discover manually. From recommendation systems to fraud detection, machine learning is driving innovation across countless applications.',
-						},
-					];
-					for (const doc of preloadedDocs) {
-						const { input_ids, attention_mask } = simpleTokenize(doc.content);
-						const inputIdsTensor = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
-						const attentionMaskTensor = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
-						const outputs = await session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor });
-						store.add({ content: doc.content, embedding: Array.from(outputs.embeddings.data) });
-					}
-					loadDocuments();
+					const getAllRequest = store.getAll();
+					await new Promise((resolve) => {
+						getAllRequest.onsuccess = () => {
+							const existingDocs = getAllRequest.result.map((doc) => doc.content);
+							const preloadedDocs = [
+								{
+									content:
+										'Neural networks draw inspiration from the intricate structure and function of biological brains, implementing artificial neurons and synapses to process information. These interconnected networks can adapt and learn from experience, forming the backbone of modern artificial intelligence systems. From simple perceptrons to complex architectures like convolutional and recurrent neural networks, these bio-inspired systems continue to push the boundaries of what machines can achieve.',
+								},
+								{
+									content:
+										"Deep learning, a specialized subset of machine learning, has revolutionized artificial intelligence by mimicking the human brain's neural networks. These sophisticated systems can process and analyze unstructured data like images, videos, and natural language with unprecedented accuracy. Through multiple layers of artificial neurons, deep learning models can automatically learn hierarchical representations of data, enabling breakthroughs in computer vision, speech recognition, and autonomous systems.",
+								},
+								{
+									content:
+										'Machine learning algorithms have become increasingly sophisticated in their ability to learn patterns from vast amounts of data. These systems can automatically improve their performance through experience, analyzing complex datasets to identify trends, make predictions, and generate insights that would be impossible for humans to discover manually. From recommendation systems to fraud detection, machine learning is driving innovation across countless applications.',
+								},
+							];
+							const newDocs = preloadedDocs.filter((doc) => !existingDocs.includes(doc.content));
+							if (newDocs.length > 0) {
+								const writeTransaction = db.transaction([storeName], 'readwrite');
+								const writeStore = writeTransaction.objectStore(storeName);
+								newDocs.forEach((doc) => {
+									const { input_ids, attention_mask } = simpleTokenize(doc.content);
+									const inputIdsTensor = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
+									const attentionMaskTensor = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
+									session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor }).then((outputs) => {
+										writeStore.add({ content: doc.content, embedding: Array.from(outputs.embeddings.data) });
+									});
+								});
+								writeTransaction.oncomplete = () => loadDocuments();
+							} else {
+								loadDocuments();
+							}
+							resolve();
+						};
+					});
 				} catch (error) {
 					console.error('Model loading or preloading error:', error);
 					loading.style.display = 'none';
