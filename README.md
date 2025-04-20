@@ -2,7 +2,7 @@
 
 A lightweight, browser-based semantic search engine that runs entirely client-side without sending data to external servers.
 
-![Browser Vector Search Demo](https://github.com/username/browser-vecsearch/raw/main/docs/demo.png)
+![Browser Vector Search Demo](./docs/demo.png))
 
 ## 🚀 Features
 
