@@ -70,6 +70,7 @@
 			}
 		</style>
 		<script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.min.js"></script>
+		<script type="module" src="https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js"></script>
 	</head>
 	<body>
 		<div class="container">
@@ -89,33 +90,42 @@
 				<div id="search-results"></div>
 			</section>
 		</div>
-		<script>
+		<script type="module">
+			import { pipeline, env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+
+			env.allowLocalModels = false;
+			env.useBrowserCache = true;
+
 			let session;
 			const dbName = 'searchDB';
 			const storeName = 'documents';
 			let db;
+			let tokenizer;
 
-			// Simple tokenizer with expected sequence length of 8
-			function simpleTokenize(text) {
-				const tokens = text
-					.toLowerCase()
-					.split(/\W+/)
-					.filter((t) => t.length > 0);
-				const vocab = new Map();
-				vocab.set('[CLS]', BigInt(101));
-				vocab.set('[SEP]', BigInt(102));
-				vocab.set('the', BigInt(200));
-				vocab.set('is', BigInt(201));
-				let inputIds = tokens.map((token) => vocab.get(token) || BigInt(100));
-				inputIds = [BigInt(101), ...inputIds, BigInt(102)];
-				const maxLength = 8;
-				if (inputIds.length > maxLength) inputIds = inputIds.slice(0, maxLength);
-				else inputIds = inputIds.concat(Array(maxLength - inputIds.length).fill(BigInt(0)));
-				const attentionMask = inputIds.map((id) => (id > BigInt(0) ? BigInt(1) : BigInt(0)));
-				return { input_ids: inputIds, attention_mask: attentionMask };
+			async function tokenizeText(text) {
+				if (!tokenizer) {
+					console.error('Tokenizer not loaded yet!');
+					const maxLength = 128;
+					const input_ids = [BigInt(101), BigInt(102), ...Array(maxLength - 2).fill(BigInt(0))];
+					const attention_mask = [BigInt(1), BigInt(1), ...Array(maxLength - 2).fill(BigInt(0))];
+					return { input_ids, attention_mask };
+				}
+				const encoded = await tokenizer(text, {
+					padding: 'max_length',
+					truncation: true,
+					max_length: 128,
+					return_tensors: 'np',
+				});
+				const input_ids = BigInt64Array.from(encoded.input_ids.data.map(BigInt));
+				const attention_mask = BigInt64Array.from(encoded.attention_mask.data.map(BigInt));
+				return { input_ids, attention_mask };
 			}
 
-			// Initialize IndexedDB
+			function normalizeEmbedding(embedding) {
+				const norm = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0));
+				return embedding.map((val) => val / norm);
+			}
+
 			const request = indexedDB.open(dbName, 1);
 			request.onupgradeneeded = (event) => {
 				db = event.target.result;
@@ -123,90 +133,102 @@
 			};
 			request.onsuccess = (event) => {
 				db = event.target.result;
-				loadDocuments();
+				initialize();
 			};
 			request.onerror = (event) => {
 				console.error('IndexedDB error:', event.target.errorCode);
 			};
 
-			// Load model and preload documents only if not already present
 			async function initialize() {
 				const loading = document.getElementById('loading');
 				const error = document.getElementById('error');
-				if (!loading || !error) {
-					console.error('Loading or error element not found');
-					return;
-				}
 				loading.style.display = 'block';
+				error.style.display = 'none';
+
 				try {
+					console.log('Loading tokenizer...');
+					tokenizer = await AutoTokenizer.from_pretrained('Xenova/all-MiniLM-L6-v2', {
+						quantized: false,
+					});
+					console.log('Tokenizer loaded successfully');
+
+					console.log('Loading ONNX model...');
 					const modelUrl = 'https://browser-vecsearch.davakharwala20.workers.dev/student_embeddings_model_quantized.onnx';
 					session = await ort.InferenceSession.create(modelUrl, {
 						executionProviders: ['wasm'],
 					});
-					loading.style.display = 'none';
-					console.log('Model loaded successfully');
+					console.log('ONNX Model loaded successfully');
 
-					// Check existing documents and preload only if not present
+					console.log('Checking and preloading documents...');
 					const transaction = db.transaction([storeName], 'readonly');
 					const store = transaction.objectStore(storeName);
 					const getAllRequest = store.getAll();
-					await new Promise((resolve) => {
-						getAllRequest.onsuccess = () => {
-							const existingDocs = getAllRequest.result.map((doc) => doc.content);
-							const preloadedDocs = [
-								{
-									content:
-										'Neural networks draw inspiration from the intricate structure and function of biological brains, implementing artificial neurons and synapses to process information. These interconnected networks can adapt and learn from experience, forming the backbone of modern artificial intelligence systems. From simple perceptrons to complex architectures like convolutional and recurrent neural networks, these bio-inspired systems continue to push the boundaries of what machines can achieve.',
-								},
-								{
-									content:
-										"Deep learning, a specialized subset of machine learning, has revolutionized artificial intelligence by mimicking the human brain's neural networks. These sophisticated systems can process and analyze unstructured data like images, videos, and natural language with unprecedented accuracy. Through multiple layers of artificial neurons, deep learning models can automatically learn hierarchical representations of data, enabling breakthroughs in computer vision, speech recognition, and autonomous systems.",
-								},
-								{
-									content:
-										'Machine learning algorithms have become increasingly sophisticated in their ability to learn patterns from vast amounts of data. These systems can automatically improve their performance through experience, analyzing complex datasets to identify trends, make predictions, and generate insights that would be impossible for humans to discover manually. From recommendation systems to fraud detection, machine learning is driving innovation across countless applications.',
-								},
-							];
-							const newDocs = preloadedDocs.filter((doc) => !existingDocs.includes(doc.content));
-							if (newDocs.length > 0) {
-								const writeTransaction = db.transaction([storeName], 'readwrite');
-								const writeStore = writeTransaction.objectStore(storeName);
-								newDocs.forEach((doc) => {
-									const { input_ids, attention_mask } = simpleTokenize(doc.content);
-									const inputIdsTensor = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
-									const attentionMaskTensor = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
-									session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor }).then((outputs) => {
-										writeStore.add({ content: doc.content, embedding: Array.from(outputs.embeddings.data) });
-									});
-								});
-								writeTransaction.oncomplete = () => loadDocuments();
-							} else {
+
+					getAllRequest.onsuccess = async () => {
+						const existingDocs = getAllRequest.result.map((doc) => doc.content);
+						const preloadedDocs = [
+							{
+								content:
+									'Neural networks draw inspiration from the intricate structure and function of biological brains, implementing artificial neurons and synapses to process information. These interconnected networks can adapt and learn from experience, forming the backbone of modern artificial intelligence systems. From simple perceptrons to complex architectures like convolutional and recurrent neural networks, these bio-inspired systems continue to push the boundaries of what machines can achieve.',
+							},
+							{
+								content:
+									"Deep learning, a specialized subset of machine learning, has revolutionized artificial intelligence by mimicking the human brain's neural networks. These sophisticated systems can process and analyze unstructured data like images, videos, and natural language with unprecedented accuracy. Through multiple layers of artificial neurons, deep learning models can automatically learn hierarchical representations of data, enabling breakthroughs in computer vision, speech recognition, and autonomous systems.",
+							},
+							{
+								content:
+									'Machine learning algorithms have become increasingly sophisticated in their ability to learn patterns from vast amounts of data. These systems can automatically improve their performance through experience, analyzing complex datasets to identify trends, make predictions, and generate insights that would be impossible for humans to discover manually. From recommendation systems to fraud detection, machine learning is driving innovation across countless applications.',
+							},
+						];
+						const newDocs = preloadedDocs.filter((doc) => !existingDocs.includes(doc.content));
+
+						if (newDocs.length > 0) {
+							console.log(`Preloading ${newDocs.length} new documents...`);
+							const writeTransaction = db.transaction([storeName], 'readwrite');
+							const writeStore = writeTransaction.objectStore(storeName);
+							await Promise.all(
+								newDocs.map(async (doc) => {
+									const { input_ids, attention_mask } = await tokenizeText(doc.content);
+									const inputIdsTensor = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
+									const attentionMaskTensor = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
+									const outputs = await session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor });
+									const embedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
+									writeStore.add({ content: doc.content, embedding });
+								})
+							);
+							writeTransaction.oncomplete = () => {
+								console.log('Preloading complete.');
 								loadDocuments();
-							}
-							resolve();
-						};
-					});
-				} catch (error) {
-					console.error('Model loading or preloading error:', error);
+							};
+						} else {
+							console.log('No new documents to preload.');
+							loadDocuments();
+						}
+						loading.style.display = 'none';
+					};
+				} catch (err) {
+					console.error('Initialization error:', err);
 					loading.style.display = 'none';
 					error.style.display = 'block';
-					error.textContent = `Error: ${error.message}. Check console for details.`;
+					error.textContent = `Error: ${err.message}. Check console for details.`;
 				}
 			}
 
-			// Add document
 			document.getElementById('add-document').addEventListener('click', async () => {
 				const text = document.getElementById('document-input').value.trim();
-				if (!text || !session) return;
+				if (!text || !session || !tokenizer) {
+					console.warn('Cannot add document: Text empty, session or tokenizer not ready.');
+					return;
+				}
 				try {
-					const { input_ids, attention_mask } = simpleTokenize(text);
-					const inputIds = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
-					const attentionMask = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
+					const { input_ids, attention_mask } = await tokenizeText(text);
+					const inputIds = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
+					const attentionMask = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
 					const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
-					const embedding = outputs.embeddings.data;
+					const embedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
 					const transaction = db.transaction([storeName], 'readwrite');
 					const store = transaction.objectStore(storeName);
-					store.add({ content: text, embedding: Array.from(embedding) });
+					store.add({ content: text, embedding });
 					transaction.oncomplete = () => {
 						document.getElementById('document-input').value = '';
 						loadDocuments();
@@ -216,7 +238,6 @@
 				}
 			});
 
-			// Load and display documents as cards
 			function loadDocuments() {
 				const transaction = db.transaction([storeName], 'readonly');
 				const store = transaction.objectStore(storeName);
@@ -234,60 +255,117 @@
 				};
 			}
 
-			// Perform search
+			function displayResults(results) {
+				const resultsDiv = document.getElementById('search-results');
+				resultsDiv.innerHTML = ''; // Clear previous results
+
+				if (results.length === 0) {
+					resultsDiv.innerHTML = '<p>No results found</p>';
+					return;
+				}
+
+				results.forEach((result) => {
+					const card = document.createElement('div');
+					card.className = 'card';
+
+					// Calculate percentage for visual indication of match quality
+					const similarityPercent = Math.round(result.similarity * 100);
+
+					card.innerHTML = `
+					<p>${result.content}</p>
+					<div class="similarity-score">
+					  <span>Relevance: ${similarityPercent}%</span>
+					  <div class="progress-bar" style="width: ${similarityPercent}%"></div>
+					</div>
+				  `;
+					resultsDiv.appendChild(card);
+				});
+			}
+
 			document.getElementById('search-button').addEventListener('click', async () => {
 				const query = document.getElementById('search-input').value.trim();
-				if (!query || !session) return;
+				if (!query || !session || !tokenizer) {
+					console.warn('Cannot search: Query empty, session or tokenizer not ready.');
+					return;
+				}
+
 				try {
-					const { input_ids, attention_mask } = simpleTokenize(query);
-					const inputIds = new ort.Tensor('int64', BigInt64Array.from(input_ids), [1, input_ids.length]);
-					const attentionMask = new ort.Tensor('int64', BigInt64Array.from(attention_mask), [1, attention_mask.length]);
+					// Start timing the entire search operation
+					const totalStartTime = performance.now();
+
+					// Time the tokenization
+					const tokenizeStartTime = performance.now();
+					const { input_ids, attention_mask } = await tokenizeText(query);
+					const tokenizeEndTime = performance.now();
+					console.log(`Tokenization: ${(tokenizeEndTime - tokenizeStartTime).toFixed(2)}ms`);
+
+					// Time the embedding generation
+					const embedStartTime = performance.now();
+					const inputIds = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
+					const attentionMask = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
 					const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
-					const queryEmbedding = outputs.embeddings.data;
+					const queryEmbedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
+					const embedEndTime = performance.now();
+					console.log(`Embedding generation: ${(embedEndTime - embedStartTime).toFixed(2)}ms`);
+
+					// Time the database access and similarity search
+					const searchStartTime = performance.now();
 					const transaction = db.transaction([storeName], 'readonly');
 					const store = transaction.objectStore(storeName);
 					const getAllRequest = store.getAll();
+
 					getAllRequest.onsuccess = () => {
+						const dbEndTime = performance.now();
+						console.log(`Database access: ${(dbEndTime - searchStartTime).toFixed(2)}ms`);
+
+						// Time the similarity calculations and sorting
+						const similarityStartTime = performance.now();
 						const documents = getAllRequest.result;
 						const results = documents
 							.map((doc) => ({
 								...doc,
-								similarity: cosineSimilarity(queryEmbedding, doc.embedding),
+								similarity: fastCosineSimilarity(queryEmbedding, doc.embedding),
 							}))
 							.sort((a, b) => b.similarity - a.similarity)
 							.slice(0, 5);
+
+						const similarityEndTime = performance.now();
+						console.log(`Vector similarity calculation: ${(similarityEndTime - similarityStartTime).toFixed(2)}ms`);
+
+						// Time the display rendering
+						const renderStartTime = performance.now();
 						displayResults(results);
+						const renderEndTime = performance.now();
+						console.log(`Rendering results: ${(renderEndTime - renderStartTime).toFixed(2)}ms`);
+
+						const totalEndTime = performance.now();
+						console.log(`Total search time: ${(totalEndTime - totalStartTime).toFixed(2)}ms`);
+
+						// Add timing to UI
+						const resultsDiv = document.getElementById('search-results');
+						const timingInfo = document.createElement('div');
+						timingInfo.className = 'timing-info';
+						timingInfo.innerHTML = `<p>Search completed in ${(totalEndTime - totalStartTime).toFixed(2)}ms</p>`;
+						resultsDiv.prepend(timingInfo);
 					};
 				} catch (error) {
 					console.error('Error searching:', error);
 				}
 			});
 
-			// Cosine similarity function
-			function cosineSimilarity(a, b) {
-				const dot = a.reduce((sum, val, i) => sum + val * b[i], 0);
-				const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
-				const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
-				return normA && normB ? dot / (normA * normB) : 0;
+			// Add this optimized cosine similarity function (assumes normalized vectors)
+			function fastCosineSimilarity(a, b) {
+				// When vectors are already normalized, cosine similarity is just the dot product
+				return a.reduce((sum, val, i) => sum + val * b[i], 0);
 			}
 
-			// Display search results with percentage and progress bar
-			function displayResults(results) {
-				const resultsDiv = document.getElementById('search-results');
-				resultsDiv.innerHTML = '';
-				results.forEach((result) => {
-					const similarityPercent = (result.similarity * 100).toFixed(2);
-					const card = document.createElement('div');
-					card.className = 'card';
-					card.innerHTML = `<p>${result.content}</p>
-                    <div>Match Score: ${similarityPercent}%</div>
-                    <div class="progress-bar" style="width: ${similarityPercent}%"></div>`;
-					resultsDiv.appendChild(card);
-				});
-			}
-
-			// Initialize the app
-			initialize();
+			// Originalnkept for reference
+			// function cosineSimilarity(a, b) {
+			// const dot = a.reduce((sum, val, i) => sum + val * b[i], 0);
+			// const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
+			// const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
+			// return normA && normB ? dot / (normA * normB) : 0;
+			// }
 		</script>
 	</body>
 </html>
