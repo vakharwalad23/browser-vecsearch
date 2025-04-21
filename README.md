@@ -13,6 +13,35 @@ A lightweight, browser-based semantic search engine that runs entirely client-si
 - **Query Highlighting** - Search terms are highlighted in results
 - **Relevance Scoring** - Visual indication of match quality
 
+## 🔬 Model Quantization
+
+The project includes a custom model quantization pipeline to reduce the size of the embedding model for browser deployment:
+
+### Quantization Process
+
+1. **Knowledge Distillation** - A smaller MiniLM model is trained to mimic the behavior of a larger teacher model (MPNet)
+2. **ONNX Export** - The student model is exported to ONNX format for cross-platform compatibility
+3. **Post-Training Quantization** - Model weights are quantized from FP32 to INT8 (75% size reduction)
+4. **Embedding Quality Preservation** - Maintains 95%+ similarity with the original model
+
+### Running the Quantization Pipeline
+
+```bash
+# Install dependencies
+pip install torch transformers datasets onnx onnxruntime numpy
+
+# Check system compatibility
+python quantization/cuda_version.py
+
+# Run the quantization process
+python quantization/quantization.py
+
+# Test the quantized model
+python quantization/test.py
+```
+
+This process reduces the model size from ~90MB to ~30MB while preserving semantic search capabilities.
+
 ## 🧠 How It Works
 
 Browser Vector Search uses transformer-based embeddings to perform semantic search without requiring a server:
