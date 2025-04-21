@@ -314,7 +314,7 @@
 					// Load tokenizer with timeout
 					const tokenizationPromise = new Promise(async (resolve, reject) => {
 						try {
-							const tokenizer = await AutoTokenizer.from_pretrained('Xenova/all-MiniLM-L6-v2', {
+							const tokenizer = await AutoTokenizer.from_pretrained('sentence-transformers/all-mpnet-base-v2', {
 								quantized: false,
 							});
 							resolve(tokenizer);
@@ -372,7 +372,7 @@
 
 					getAllRequest.onsuccess = async () => {
 						const existingDocs = getAllRequest.result.map((doc) => doc.content);
-						// Updated example documents from diverse domains
+						// Example documents from diverse domains
 						const preloadedDocs = [
 							{
 								content:
@@ -438,16 +438,25 @@
 
 					await Promise.all(
 						docBatch.map(async (doc) => {
-							const { input_ids, attention_mask } = await tokenizeText(doc.content);
-							const inputIdsTensor = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
-							const attentionMaskTensor = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
-							const outputs = await session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor });
-							const embedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
-							writeStore.add({ content: doc.content, embedding });
+							const sentences = doc.content.match(/[^\.!\?]+[\.!\?]+/g) || [doc.content];
+							const chunkSize = 3; // Combine 3 sentences per chunk
+							for (let i = 0; i < sentences.length; i += chunkSize) {
+								const chunk = sentences
+									.slice(i, i + chunkSize)
+									.join(' ')
+									.trim();
+								if (chunk) {
+									const { input_ids, attention_mask } = await tokenizeText(chunk);
+									const inputIdsTensor = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
+									const attentionMaskTensor = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
+									const outputs = await session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor });
+									const embedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
+									writeStore.add({ content: chunk, embedding, parentDoc: doc.content });
+								}
+							}
 						})
 					);
 
-					// Update progress
 					const progress = Math.round(((processedSoFar + docBatch.length) / total) * 100);
 					showOperationIndicator(true, `Preparing documents (${progress}%)...`);
 
@@ -455,7 +464,7 @@
 						writeTransaction.oncomplete = resolve;
 						writeTransaction.onerror = (e) => {
 							console.error('Batch processing error:', e);
-							resolve(); // Continue with next batch even if this one fails
+							resolve();
 						};
 					});
 				} catch (err) {
@@ -671,15 +680,36 @@
 							return;
 						}
 
-						const results = documents
+						// Compute similarities and group by parentDoc
+						const results = documents.map((doc) => ({
+							content: doc.parentDoc || doc.content, // Use parentDoc if available
+							sentence: doc.content,
+							similarity: cosineSimilarity(queryEmbedding, doc.embedding),
+						}));
+
+						// Aggregate by parentDoc
+						const aggregatedResults = {};
+						results.forEach((result) => {
+							const key = result.content;
+							if (!aggregatedResults[key]) {
+								aggregatedResults[key] = {
+									content: key,
+									similarities: [],
+								};
+							}
+							aggregatedResults[key].similarities.push(result.similarity);
+						});
+
+						// Compute max similarity for each parentDoc
+						const finalResults = Object.values(aggregatedResults)
 							.map((doc) => ({
-								...doc,
-								similarity: cosineSimilarity(queryEmbedding, doc.embedding),
+								content: doc.content,
+								similarity: Math.max(...doc.similarities), // Use max similarity
 							}))
 							.sort((a, b) => b.similarity - a.similarity)
 							.slice(0, 5);
 
-						displayResults(results, query);
+						displayResults(finalResults, query);
 					};
 				} catch (error) {
 					console.error('Error searching:', error);

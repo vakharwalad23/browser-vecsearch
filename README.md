@@ -103,7 +103,7 @@ function cosineSimilarity(a, b) {
 
 ## 📚 Technical Details
 
-- **Model**: MiniLM-L6-v2 (quantized ONNX format)
+- **Model**: MiniLM-L12-v2 (quantized ONNX format)
 - **Vector Size**: 384 dimensions
 - **Search Algorithm**: Cosine similarity with normalized vectors
 - **Performance Optimizations**:
