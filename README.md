@@ -13,40 +13,11 @@ A lightweight, browser-based semantic search engine that runs entirely client-si
 - **Query Highlighting** - Search terms are highlighted in results
 - **Relevance Scoring** - Visual indication of match quality
 
-## 🔬 Model Quantization
-
-The project includes a custom model quantization pipeline to reduce the size of the embedding model for browser deployment:
-
-### Quantization Process
-
-1. **Knowledge Distillation** - A smaller MiniLM model is trained to mimic the behavior of a larger teacher model (MPNet)
-2. **ONNX Export** - The student model is exported to ONNX format for cross-platform compatibility
-3. **Post-Training Quantization** - Model weights are quantized from FP32 to INT8 (75% size reduction)
-4. **Embedding Quality Preservation** - Maintains 95%+ similarity with the original model
-
-### Running the Quantization Pipeline
-
-```bash
-# Install dependencies
-pip install torch transformers datasets onnx onnxruntime numpy
-
-# Check system compatibility
-python quantization/cuda_version.py
-
-# Run the quantization process
-python quantization/quantization.py
-
-# Test the quantized model
-python quantization/test.py
-```
-
-This process reduces the model size from ~90MB to ~30MB while preserving semantic search capabilities.
-
 ## 🧠 How It Works
 
 Browser Vector Search uses transformer-based embeddings to perform semantic search without requiring a server:
 
-1. **Embedding Generation** - Converts text to 384-dimensional vectors using MiniLM
+1. **Embedding Generation** - Converts text to 512-dimensional vectors using Jina Embeddings
 2. **Vector Normalization** - Prepares vectors for similarity comparison
 3. **Cosine Similarity** - Measures semantic relevance between queries and documents
 4. **IndexedDB Storage** - Persists documents and embeddings between sessions
@@ -54,8 +25,7 @@ Browser Vector Search uses transformer-based embeddings to perform semantic sear
 
 ## 🛠️ Technical Stack
 
-- **ONNX Runtime** - For efficient model inference in browser
-- **Transformers.js** - Provides tokenization capabilities
+- **@xenova/transformers** - For efficient model inference and tokenization
 - **IndexedDB** - Browser-based document storage
 - **Cloudflare Workers** - Serves static assets and model files
 - **Vanilla JavaScript** - No framework dependencies
@@ -114,10 +84,12 @@ Browser Vector Search uses transformer-based embeddings to perform semantic sear
 
 ### Adding Your Own Model
 
-Replace the model URL in [`public/index.html`](public/index.html):
+Change the model in the pipeline call in [`public/index.html`](public/index.html):
 
 ```javascript
-const modelUrl = 'https://your-domain.com/your-model.onnx';
+const extractorPipeline = await pipeline('feature-extraction', 'Xenova/your-preferred-model', {
+	quantized: true,
+});
 ```
 
 ### Modifying Similarity Calculation
@@ -126,14 +98,15 @@ The core similarity function can be adjusted in [`public/index.html`](public/ind
 
 ```javascript
 function cosineSimilarity(a, b) {
-	// Customize similarity calculation here
+	// You can use the built-in function or customize
+	return cos_sim(a, b);
 }
 ```
 
 ## 📚 Technical Details
 
-- **Model**: MiniLM-L12-v2 (quantized ONNX format)
-- **Vector Size**: 384 dimensions
+- **Model**: Jina Embeddings v2 Small (via Xenova/transformers.js)
+- **Vector Size**: 512 dimensions
 - **Search Algorithm**: Cosine similarity with normalized vectors
 - **Performance Optimizations**:
   - Debounced search (300ms)
@@ -153,6 +126,8 @@ MIT
 
 - Hugging Face Transformers
 - ONNX Runtime Web
+- Xenova Transformers.js
+- Jina AI
 - Cloudflare Workers
 
 ---
