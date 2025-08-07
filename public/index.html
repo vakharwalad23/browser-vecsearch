@@ -164,14 +164,13 @@
 		</div>
 
 		<script type="module">
-			import { env, AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
+			import { env, pipeline, cos_sim } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/dist/transformers.min.js';
 
 			// Core configuration with safety measures
 			env.allowLocalModels = false;
 			env.useBrowserCache = true;
-			let session = null;
+			let extractor = null;
 			let db = null;
-			let tokenizer = null;
 			let isProcessing = false;
 			const dbName = 'searchDB';
 			const storeName = 'documents';
@@ -206,32 +205,6 @@
 				};
 			}
 
-			// Safer tokenization with fallbacks
-			async function tokenizeText(text) {
-				if (!tokenizer) {
-					console.warn('Tokenizer not loaded yet, using fallback');
-					const maxLength = 128;
-					const input_ids = [BigInt(101), BigInt(102), ...Array(maxLength - 2).fill(BigInt(0))];
-					const attention_mask = [BigInt(1), BigInt(1), ...Array(maxLength - 2).fill(BigInt(0))];
-					return { input_ids, attention_mask };
-				}
-
-				try {
-					const encoded = await tokenizer(text, {
-						padding: 'max_length',
-						truncation: true,
-						max_length: 128,
-						return_tensors: 'np',
-					});
-					const input_ids = BigInt64Array.from(encoded.input_ids.data.map(BigInt));
-					const attention_mask = BigInt64Array.from(encoded.attention_mask.data.map(BigInt));
-					return { input_ids, attention_mask };
-				} catch (e) {
-					console.error('Tokenization error:', e);
-					throw new Error('Failed to tokenize text');
-				}
-			}
-
 			// Optimized normalization and similarity functions
 			function normalizeEmbedding(embedding) {
 				const norm = Math.sqrt(embedding.reduce((sum, val) => sum + val * val, 0));
@@ -239,31 +212,7 @@
 			}
 
 			function cosineSimilarity(a, b) {
-				// Handle edge cases: vectors must have the same length
-				if (a.length !== b.length) {
-					throw new Error('Vectors must have the same length');
-				}
-
-				let dotProduct = 0;
-				let magnitudeA = 0;
-				let magnitudeB = 0;
-
-				for (let i = 0; i < a.length; i++) {
-					dotProduct += a[i] * b[i];
-					magnitudeA += a[i] * a[i];
-					magnitudeB += b[i] * b[i];
-				}
-
-				magnitudeA = Math.sqrt(magnitudeA);
-				magnitudeB = Math.sqrt(magnitudeB);
-
-				// Avoid division by zero
-				if (magnitudeA === 0 || magnitudeB === 0) {
-					return 0; // Cosine similarity is undefined; return 0 as a convention
-				}
-
-				// Standard cosine similarity
-				return dotProduct / (magnitudeA * magnitudeB);
+				return cos_sim(a, b);
 			}
 
 			// Initialize IndexedDB with proper error handling
@@ -311,36 +260,24 @@
 					await initializeDB();
 					showProgress(20);
 
-					// Load tokenizer with timeout
-					const tokenizationPromise = new Promise(async (resolve, reject) => {
+					// Load model through pipeline API with timeout
+					const modelLoadPromise = new Promise(async (resolve, reject) => {
 						try {
-							const tokenizer = await AutoTokenizer.from_pretrained('sentence-transformers/all-mpnet-base-v2', {
-								quantized: false,
+							const extractorPipeline = await pipeline('feature-extraction', 'Xenova/jina-embeddings-v2-small-en', {
+								quantized: true,
 							});
-							resolve(tokenizer);
+							resolve(extractorPipeline);
 						} catch (e) {
 							reject(e);
 						}
 					});
 
-					// Add timeout to prevent hanging
-					const tokenizationTimeout = new Promise((_, reject) => {
-						setTimeout(() => reject(new Error('Tokenizer loading timed out')), 20000);
+					const modelLoadTimeout = new Promise((_, reject) => {
+						setTimeout(() => reject(new Error('Model loading timed out')), 30000);
 					});
 
-					tokenizer = await Promise.race([tokenizationPromise, tokenizationTimeout]);
-					showProgress(50);
-
-					// Load ONNX model with proper options
-					const modelUrl = 'https://pub-3ad2deff951449b88c6e8b1f6f494824.r2.dev/student_embeddings_model_quantized.onnx';
-
-					// Break up model loading for better progress feedback
 					showOperationIndicator(true, 'Loading model...');
-					session = await ort.InferenceSession.create(modelUrl, {
-						executionProviders: ['wasm'],
-						graphOptimizationLevel: 'all',
-						enableCpuMemArena: false, // Reduce memory usage
-					});
+					extractor = await Promise.race([modelLoadPromise, modelLoadTimeout]);
 					showOperationIndicator(false);
 					showProgress(80);
 
@@ -360,6 +297,17 @@
 					error.style.display = 'block';
 					error.textContent = `Error: ${err.message}. Try reloading the page.`;
 					showProgress(100);
+				}
+			}
+
+			// Generate embeddings using the pipeline
+			async function generateEmbedding(text) {
+				try {
+					const output = await extractor(text, { pooling: 'mean' });
+					return Array.from(output.data); // Extract the embedding data
+				} catch (error) {
+					console.error('Error generating embedding:', error);
+					throw error;
 				}
 			}
 
@@ -446,11 +394,7 @@
 									.join(' ')
 									.trim();
 								if (chunk) {
-									const { input_ids, attention_mask } = await tokenizeText(chunk);
-									const inputIdsTensor = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
-									const attentionMaskTensor = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
-									const outputs = await session.run({ input_ids: inputIdsTensor, attention_mask: attentionMaskTensor });
-									const embedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
+									const embedding = await generateEmbedding(chunk);
 									writeStore.add({ content: chunk, embedding, parentDoc: doc.content });
 								}
 							}
@@ -511,7 +455,7 @@
 			// Add document with appropriate safeguards
 			async function addDocument() {
 				const text = document.getElementById('document-input').value.trim();
-				if (!text || !session || !tokenizer || isProcessing) {
+				if (!text || !extractor || isProcessing) {
 					return;
 				}
 
@@ -519,11 +463,7 @@
 					isProcessing = true;
 					showOperationIndicator(true, 'Processing document...');
 
-					const { input_ids, attention_mask } = await tokenizeText(text);
-					const inputIds = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
-					const attentionMask = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
-					const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
-					const embedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
+					const embedding = await generateEmbedding(text);
 
 					const transaction = db.transaction([storeName], 'readwrite');
 					const store = transaction.objectStore(storeName);
@@ -655,17 +595,13 @@
 
 			// Perform search with query
 			async function performSearch(query) {
-				if (!query || !session || !tokenizer) {
+				if (!query || !extractor) {
 					return;
 				}
 
 				try {
 					// Generate embedding for query
-					const { input_ids, attention_mask } = await tokenizeText(query);
-					const inputIds = new ort.Tensor('int64', input_ids, [1, input_ids.length]);
-					const attentionMask = new ort.Tensor('int64', attention_mask, [1, attention_mask.length]);
-					const outputs = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
-					const queryEmbedding = normalizeEmbedding(Array.from(outputs.embeddings.data));
+					const queryEmbedding = await generateEmbedding(query);
 
 					// Get documents and compute similarities
 					const transaction = db.transaction([storeName], 'readonly');
