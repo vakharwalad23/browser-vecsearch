@@ -169,6 +169,25 @@
 			// Core configuration with safety measures
 			env.allowLocalModels = false;
 			env.useBrowserCache = true;
+
+			// Override the model file fetching to use our proxy
+			const originalGetFile = globalThis.fetch;
+			globalThis.fetch = function (url, options) {
+				// Check if this is a Hugging Face model request
+				if (typeof url === 'string' && url.includes('huggingface.co')) {
+					// Extract the path after huggingface.co
+					const match = url.match(/https:\/\/huggingface\.co\/(.+)/);
+					if (match) {
+						const modelPath = match[1];
+						const proxyUrl = `${window.location.origin}/proxy/huggingface/${modelPath}`;
+						console.log('Redirecting HF request from:', url, 'to:', proxyUrl);
+						return originalGetFile(proxyUrl, options);
+					}
+				}
+				// For all other requests, use the original fetch
+				return originalGetFile(url, options);
+			};
+
 			let extractor = null;
 			let db = null;
 			let isProcessing = false;
@@ -273,7 +292,7 @@
 					});
 
 					const modelLoadTimeout = new Promise((_, reject) => {
-						setTimeout(() => reject(new Error('Model loading timed out')), 30000);
+						setTimeout(() => reject(new Error('Model loading timed out')), 60000);
 					});
 
 					showOperationIndicator(true, 'Loading model...');

@@ -14,12 +14,12 @@
 		"directory": "./public",
 		"not_found_handling": "single-page-application"
 	},
-	"r2_buckets": [
-		{
-			"bucket_name": "browser-search",
-			"binding": "browser_search"
-		}
-	],
+	// "r2_buckets": [
+	// 	{
+	// 		"bucket_name": "browser-search",
+	// 		"binding": "browser_search"
+	// 	}
+	// ],
 	"observability": {
 		"enabled": true
 	}
